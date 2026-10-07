@@ -1,0 +1,10 @@
+{
+  "name": "SafMove - Accra Motorcycle & Delivery PWA",
+  "description": "Fast, highly secure motorcycle transport and express delivery PWA for Accra, Ghana. Verified riders, instant dispatch routing, and trusted community safety.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

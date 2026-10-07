@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="trainGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F59E0B" />
+      <stop offset="50%" stop-color="#EAB308" />
+      <stop offset="100%" stop-color="#10B981" />
+    </linearGradient>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A" />
+      <stop offset="100%" stop-color="#020617" />
+    </linearGradient>
+  </defs>
+  <!-- Background with subtle border -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)"/>
+  <rect x="12" y="12" width="488" height="488" rx="100" fill="none" stroke="#F59E0B" stroke-opacity="0.3" stroke-width="4"/>
+
+  <!-- Speed Trails / Accra Velocity lines -->
+  <path d="M72 170 H190" stroke="#F59E0B" stroke-width="12" stroke-linecap="round" opacity="0.6"/>
+  <path d="M52 230 H150" stroke="#F59E0B" stroke-width="16" stroke-linecap="round" opacity="0.8"/>
+  <path d="M72 290 H210" stroke="#10B981" stroke-width="12" stroke-linecap="round" opacity="0.7"/>
+  <path d="M92 350 H170" stroke="#10B981" stroke-width="10" stroke-linecap="round" opacity="0.5"/>
+
+  <!-- Motorcycle Silhouette & UniqueTrain Fast Monogram -->
+  <g transform="translate(140, 90)">
+    <!-- Helmet & Rider Focus -->
+    <circle cx="160" cy="80" r="44" fill="#F59E0B"/>
+    <path d="M165 72 L198 84 L165 96 Z" fill="#0F172A"/>
+
+    <!-- Motorcycle Front & Shield -->
+    <path d="M140 120 L230 140 L210 210 L120 180 Z" fill="url(#trainGrad)" opacity="0.95"/>
+    <!-- Wheel Front -->
+    <circle cx="230" cy="240" r="54" fill="none" stroke="#F59E0B" stroke-width="20"/>
+    <circle cx="230" cy="240" r="22" fill="#F59E0B"/>
+    <circle cx="230" cy="240" r="8" fill="#0F172A"/>
+
+    <!-- Wheel Rear -->
+    <circle cx="50" cy="240" r="54" fill="none" stroke="#10B981" stroke-width="20"/>
+    <circle cx="50" cy="240" r="22" fill="#10B981"/>
+    <circle cx="50" cy="240" r="8" fill="#0F172A"/>
+
+    <!-- Chassis connecting wheels -->
+    <path d="M50 240 L120 180 L180 180 L230 240" stroke="#FFFFFF" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <path d="M120 180 L150 110" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round" fill="none"/>
+
+    <!-- Delivery Box / Passenger Seat -->
+    <rect x="40" y="130" width="56" height="52" rx="10" fill="#F59E0B"/>
+    <path d="M54 156 H82" stroke="#0F172A" stroke-width="5" stroke-linecap="round"/>
+  </g>
+
+  <!-- Ghana Black Star Trust Emblem Badge -->
+  <g transform="translate(390, 80) scale(0.65)">
+    <polygon points="50,5 64,36 98,36 70,57 81,89 50,70 19,89 30,57 2,36 36,36" fill="#F59E0B" />
+  </g>
+</svg>
