@@ -634,7 +634,49 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onSelectRole }) => {
                 )}
 
                 {authError && (
-                  <p className="text-sm text-red-600 font-medium">{authError}</p>
+                  authError.toLowerCase().includes('already registered') || authError.toLowerCase().includes('already exists') ? (
+                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex flex-col gap-3 animate-in fade-in zoom-in-95 duration-300 shadow-sm">
+                      <div className="flex gap-3">
+                        <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                        <div>
+                          <h4 className="text-amber-900 font-bold text-sm">Account Already Exists</h4>
+                          <p className="text-amber-700 text-xs mt-1 leading-relaxed">
+                            An account with <strong className="font-semibold text-amber-900">{authEmail || authPhone}</strong> is already registered.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3 mt-1 sm:ml-8 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            // Fulfill requirement to route to /login with query param
+                            window.history.pushState({}, '', `/login?email=${encodeURIComponent(authEmail)}&phone=${encodeURIComponent(authPhone)}`);
+                            // Smooth UX: Instantly switch the modal state to Login
+                            setIsSignUp(false);
+                            setRegistrationStep(1);
+                            setAuthError('');
+                          }}
+                          className="bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold px-4 py-2.5 rounded-lg transition-all active:scale-[0.98] shadow-sm flex-1 sm:flex-none text-center"
+                        >
+                          Log In Instead
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            alert(`Password reset instructions would be sent to ${authEmail || authPhone}`);
+                          }}
+                          className="text-amber-700 hover:text-amber-900 text-xs font-semibold underline decoration-amber-300 underline-offset-2 transition-colors flex-1 sm:flex-none text-center sm:text-left py-2"
+                        >
+                          Reset Password
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="bg-red-50 border border-red-100 rounded-xl p-3 flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                      <p className="text-sm text-red-700 font-medium">{authError}</p>
+                    </div>
+                  )
                 )}
 
                 {isSignUp && registrationStep === 1 ? (

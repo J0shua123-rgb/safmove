@@ -1253,7 +1253,8 @@ export const UserPortal: React.FC<UserPortalProps> = ({
               </div>
             )}
           </div>
-        )}
+        </div>
+      )}
 
         {/* ========================================================================= */}
         {/* TAB 3: PROFILE (ACCOUNT & SAFETY CONTACTS - ZERO WALLET / PAYMENT MENTIONS) */}
