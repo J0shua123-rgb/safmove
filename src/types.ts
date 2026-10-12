@@ -120,3 +120,33 @@ export interface AccraZoneStats {
   avgWaitMinutes: number;
   trafficIndex: 'Low' | 'Moderate' | 'Heavy (Go-Slow)';
 }
+
+export type RideStatus =
+  | 'searching'
+  | 'accepted'
+  | 'arriving'
+  | 'in_progress'
+  | 'completed'
+  | 'cancelled';
+
+export interface RideRequest {
+  id: string;
+  passenger_id?: string;
+  driver_id?: string | null;
+  pickup_lat: number;
+  pickup_lng: number;
+  pickup_address: string;
+  dropoff_lat: number;
+  dropoff_lng: number;
+  dropoff_address: string;
+  fare_amount: number;
+  status: RideStatus;
+  passenger_name?: string;
+  passenger_phone?: string;
+  driver_name?: string;
+  driver_phone?: string;
+  driver_plate?: string;
+  created_at: string;
+  updated_at: string;
+}
+

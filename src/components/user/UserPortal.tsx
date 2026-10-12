@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Cropper from 'react-easy-crop';
 import { 
   Bike, 
@@ -26,8 +26,17 @@ import {
   ExternalLink,
   Camera,
   Upload,
-  LogOut
+  LogOut,
+  Loader2,
+  Receipt,
 } from 'lucide-react';
+import { SOSEmergencyButton } from '../common/SOSEmergencyButton';
+import { FareEstimator } from '../common/FareEstimator';
+import { TripRatingModal } from '../common/TripRatingModal';
+import { TripReceipt } from '../common/TripReceipt';
+import { DriverETATracker } from '../common/DriverETATracker';
+import { MoMoPaymentModal } from '../common/MoMoPaymentModal';
+import { useToast } from '../common/ToastNotification';
 import { 
   AccraLocation, 
   DriverProfile, 
@@ -50,8 +59,8 @@ import {
 } from '../../lib/supabase';
 import { processImageFile } from '../../lib/imageUtils';
 import { PWAInstallButton } from '../common/PWAInstallButton';
-import { LeafletMap } from '../common/LeafletMap';
-import { initializeSimulatedDrivers, startDriverSimulation, stopDriverSimulation, clearSimulatedDrivers } from '../../lib/simulateDrivers';
+import { MapboxMap } from '../MapboxMap';
+import { initializeSimulatedDrivers, startDriverSimulation, stopDriverSimulation } from '../../lib/simulateDrivers';
 
 interface UserPortalProps {
   onBackToHome: () => void;
@@ -81,6 +90,16 @@ export const UserPortal: React.FC<UserPortalProps> = ({
   const [recipientName, setRecipientName] = useState('');
   const [recipientPhone, setRecipientPhone] = useState('');
   const [calculatedFare, setCalculatedFare] = useState<number>(0);
+  const [bookingError, setBookingError] = useState<string | null>(null);
+
+  // Post-trip modals
+  const [tripToRate, setTripToRate] = useState<TripOrder | null>(null);
+  const [tripReceipt, setTripReceipt] = useState<TripOrder | null>(null);
+  const [completedTripRating, setCompletedTripRating] = useState<number>(0);
+  const [showMomoModal, setShowMomoModal] = useState(false);
+
+  // Toast notifications
+  const { showToast } = useToast();
 
   // Persistent Passenger Profile State - use Supabase profile or fallback to local storage
   const [passengerProfile, setPassengerProfile] = useState<UserProfile | null>(() => {
@@ -120,10 +139,11 @@ export const UserPortal: React.FC<UserPortalProps> = ({
   useEffect(() => {
     if (propUserProfile) {
       setPassengerProfile(propUserProfile);
+      saveLocalPassengerProfile(propUserProfile);
     }
   }, [propUserProfile]);
 
-  // Fetch active Supabase user session and metadata
+  // Fetch active Supabase user session and metadata — MUST be declared before the auto-profile effect below
   const [userData, setUserData] = useState<any>(null);
   useEffect(() => {
     const fetchUserData = async () => {
@@ -133,6 +153,27 @@ export const UserPortal: React.FC<UserPortalProps> = ({
     };
     fetchUserData();
   }, []);
+
+  // Auto-create passenger profile for new Supabase users who have no local profile (fixes deadlock)
+  useEffect(() => {
+    if (!passengerProfile && userData) {
+      const autoProfile: UserProfile = {
+        id: userData.id,
+        username: userData.email?.split('@')[0] || 'user',
+        fullName: userData.user_metadata?.full_name || userData.email?.split('@')[0] || 'SafMove User',
+        phone: userData.user_metadata?.phone || '',
+        email: userData.email || '',
+        avatarUrl: userData.user_metadata?.avatar_url || '',
+        role: 'user',
+        trustedContactName: '',
+        trustedContactPhone: '',
+        createdAt: userData.created_at || new Date().toISOString(),
+      };
+      setPassengerProfile(autoProfile);
+      saveLocalPassengerProfile(autoProfile);
+    }
+  }, [userData, passengerProfile]);
+
 
   // Crop Modal State
   const [showCropModal, setShowCropModal] = useState(false);
@@ -150,51 +191,48 @@ export const UserPortal: React.FC<UserPortalProps> = ({
   const [currentRideId, setCurrentRideId] = useState<string | null>(null);
 
   // Fetch initial driver locations from Supabase
+  // Note: driver_locations is optional — falls back gracefully if table doesn't exist
   useEffect(() => {
+    if (!supabase) return;
+
     const fetchDriverLocations = async () => {
-      if (!supabase) return;
       try {
-        const { data, error } = await supabase
+        const { data, error } = await supabase!
           .from('driver_locations')
           .select('*')
           .eq('is_active', true)
           .order('last_updated', { ascending: false });
 
-        if (error) {
-          console.error('Error fetching driver locations:', error);
-        } else {
-          setActiveDrivers(data || []);
+        // Soft fail — table may not exist in all envs
+        if (!error && data) {
+          setActiveDrivers(data);
         }
-      } catch (err) {
-        console.error('Failed to fetch driver locations:', err);
+      } catch {
+        // Silently ignore — driver_locations is optional
       }
     };
 
     fetchDriverLocations();
 
-    // Subscribe to real-time changes
-    if (!supabase) return;
     const channel = supabase
       .channel('driver_tracking')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'driver_locations' }, (payload) => {
         if (payload.eventType === 'INSERT') {
-          setActiveDrivers(prev => [...prev, payload.new]);
+          setActiveDrivers((prev) => [...prev, payload.new]);
         } else if (payload.eventType === 'UPDATE') {
-          setActiveDrivers(prev => prev.map(driver => 
-            driver.id === payload.new.id ? payload.new : driver
-          ));
+          setActiveDrivers((prev) =>
+            prev.map((driver) => (driver.id === payload.new.id ? payload.new : driver))
+          );
         } else if (payload.eventType === 'DELETE') {
-          setActiveDrivers(prev => prev.filter(driver => driver.id !== payload.old.id));
+          setActiveDrivers((prev) => prev.filter((driver) => driver.id !== payload.old.id));
         }
       })
       .subscribe();
 
     return () => {
-      if (supabase) {
-        supabase.removeChannel(channel);
-      }
+      supabase!.removeChannel(channel);
     };
-  }, [supabase]);
+  }, []);
 
   // Update edit fields whenever passengerProfile updates
   useEffect(() => {
@@ -371,21 +409,31 @@ export const UserPortal: React.FC<UserPortalProps> = ({
     return () => clearInterval(interval);
   }, []);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     const allDrivers = await SafMoveAPI.getDrivers();
     setDrivers(allDrivers.filter((d) => d.status === 'approved'));
 
     const allTrips = await SafMoveAPI.getTrips();
-    // Check if there is an active trip for this user
-    const currentActive = allTrips.find(
-      (t) => t.status === 'requested' || t.status === 'accepted' || t.status === 'arriving' || t.status === 'in_progress'
+    const myUserId = userData?.id || passengerProfile?.id;
+
+    // FIX: Filter trips by userId to prevent data leaking between passengers
+    const myTrips = myUserId
+      ? allTrips.filter((t) => t.userId === myUserId)
+      : allTrips;
+
+    const currentActive = myTrips.find(
+      (t) =>
+        t.status === 'requested' ||
+        t.status === 'accepted' ||
+        t.status === 'arriving' ||
+        t.status === 'in_progress'
     );
     setActiveTrip(currentActive || null);
 
-    // Past completed trips (filtered for user)
-    const completed = allTrips.filter((t) => t.status === 'completed');
+    // Past completed trips for this user
+    const completed = myTrips.filter((t) => t.status === 'completed');
     setPastTrips(completed);
-  };
+  }, [userData?.id, passengerProfile?.id]);
 
   // Route Calculations (Pure Distance & Time - Zero Financials)
   const distanceKm = calculateDistanceKm(pickup.lat, pickup.lng, dropoff.lat, dropoff.lng);
@@ -398,140 +446,118 @@ export const UserPortal: React.FC<UserPortalProps> = ({
     onlineDrivers.find((d) => d.currentZone?.toLowerCase().includes(pickup.name.toLowerCase())) ||
     (onlineDrivers.length > 0 ? onlineDrivers[0] : approvedDrivers[0]);
 
-  // Handle Request Trip (Supabase-based booking flow)
+  // Handle Request Trip (Supabase-based booking flow into 'rides' table)
   const handleRequestTrip = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (!userData) {
-      console.error('No user session available');
-      return;
-    }
-
+    setBookingError(null);
     setIsSearchingRider(true);
     setSearchStep(1);
 
     try {
-      if (!supabase) {
-        console.error('Supabase client not initialized');
-        setIsSearchingRider(false);
-        return;
-      }
-
       // Calculate fare
       const fare = calculateFare(pickup.lat, pickup.lng, dropoff.lat, dropoff.lng);
       setCalculatedFare(fare);
 
-      // Insert new ride into Supabase
-      const { data: rideData, error } = await supabase
-        .from('rides')
-        .insert({
-          passenger_id: userData.id,
-          driver_id: null,
-          pickup_lat: pickup.lat,
-          pickup_lng: pickup.lng,
-          pickup_address: pickup.name,
-          dropoff_lat: dropoff.lat,
-          dropoff_lng: dropoff.lng,
-          dropoff_address: dropoff.name,
-          fare_amount: fare,
-          status: 'searching',
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
-        })
-        .select()
-        .single();
+      // Save to Supabase 'rides' table with local fallback via SafMoveAPI
+      const rideData = await SafMoveAPI.dispatchRideRequest({
+        passenger_id: userData?.id || 'guest-passenger',
+        passenger_name: userData?.user_metadata?.full_name || passengerProfile?.fullName || 'Daniel',
+        passenger_phone: userData?.user_metadata?.phone || passengerProfile?.phone || '+233 24 123 4567',
+        pickup_address: pickup.name,
+        pickup_lat: pickup.lat,
+        pickup_lng: pickup.lng,
+        dropoff_address: dropoff.name,
+        dropoff_lat: dropoff.lat,
+        dropoff_lng: dropoff.lng,
+        fare_amount: fare,
+        status: 'searching',
+      });
 
-      if (error) {
-        console.error('Error creating ride:', error);
-        setIsSearchingRider(false);
-        return;
+      if (!rideData) {
+        throw new Error('Could not create ride dispatch request');
       }
 
-      if (rideData) {
-        setCurrentRideId(rideData.id);
+      setCurrentRideId(rideData.id);
+      setSearchStep(2);
 
-        // Subscribe to ride status changes
-        const rideChannel = supabase!.channel(`ride_${rideData.id}`)
-          .on('postgres_changes',
-            {
-              event: 'UPDATE',
-              schema: 'public',
-              table: 'rides',
-              filter: `id=eq.${rideData.id}`
-            }, (payload: any) => {
-            if (payload.new.status === 'accepted') {
-              // Driver accepted the ride
-              setSearchStep(3);
-              // Update activeTrip with new data
-              setActiveTrip({
-                id: payload.new.id,
-                userId: userData.id,
-                userName: userData.user_metadata?.full_name || 'User',
-                userPhone: userData.user_metadata?.phone || '',
-                userPhoto: userData.user_metadata?.avatar_url || '',
-                driverId: payload.new.driver_id,
-                driverName: 'SafMove Rider',
-                driverPhone: '',
-                driverPhoto: '',
-                driverModel: 'Motorcycle',
-                driverPlate: '',
-                serviceType: serviceType,
-                pickupLocation: pickup,
-                dropoffLocation: dropoff,
-                distanceKm: calculateDistanceKm(pickup.lat, pickup.lng, dropoff.lat, dropoff.lng),
-                estDurationMinutes: Math.max(5, Math.round(calculateDistanceKm(pickup.lat, pickup.lng, dropoff.lat, dropoff.lng) * 2.8)),
-                fareGHS: fare,
-                surgeMultiplier: 1,
-                paymentMethod: 'cash',
-                paymentStatus: 'pending',
-                status: 'accepted' as any,
-                createdAt: payload.new.created_at,
-                updatedAt: payload.new.updated_at,
-                liveShareToken: ''
-              });
-            } else if (payload.new.status === 'in_progress') {
-              // Ride is in progress
-              setActiveTrip(prev => prev ? { ...prev, status: 'in_progress' as any } : null);
-            } else if (payload.new.status === 'completed') {
-              // Ride completed
-              setIsSearchingRider(false);
-              setActiveTrip(null);
-              // Reload trips to get updated history
-              loadData();
-            } else if (payload.new.status === 'cancelled') {
-              // Ride cancelled
-              setIsSearchingRider(false);
-              setActiveTrip(null);
-            }
-          })
-          .subscribe();
+      // Subscribe to real-time status updates on 'rides' table
+      const unsubscribe = SafMoveAPI.subscribeToRide(rideData.id, (payload) => {
+        if (payload.status === 'accepted') {
+          setSearchStep(3);
+          setActiveTrip({
+            id: payload.id,
+            userId: payload.passenger_id || 'guest',
+            userName: payload.passenger_name || 'Daniel',
+            userPhone: payload.passenger_phone || '+233 24 123 4567',
+            userPhoto: userData?.user_metadata?.avatar_url || '',
+            driverId: payload.driver_id || 'driver-matched',
+            driverName: payload.driver_name || 'SafMove Verified Rider',
+            driverPhone: payload.driver_phone || '+233 24 888 9999',
+            driverPhoto: '',
+            driverModel: 'Motorcycle',
+            driverPlate: payload.driver_plate || 'GR-24-4502',
+            serviceType: serviceType,
+            pickupLocation: pickup,
+            dropoffLocation: dropoff,
+            distanceKm: calculateDistanceKm(pickup.lat, pickup.lng, dropoff.lat, dropoff.lng),
+            estDurationMinutes: Math.max(5, Math.round(calculateDistanceKm(pickup.lat, pickup.lng, dropoff.lat, dropoff.lng) * 2.8)),
+            fareGHS: fare,
+            surgeMultiplier: 1,
+            paymentMethod: 'cash',
+            paymentStatus: 'pending',
+            status: 'accepted' as any,
+            createdAt: payload.created_at,
+            updatedAt: payload.updated_at,
+            liveShareToken: '',
+          });
+        } else if (payload.status === 'in_progress') {
+          setActiveTrip((prev) => (prev ? { ...prev, status: 'in_progress' as any } : null));
+        } else if (payload.status === 'completed') {
+          setIsSearchingRider(false);
+          setActiveTrip(null);
+          loadData();
+        } else if (payload.status === 'cancelled') {
+          setIsSearchingRider(false);
+          setActiveTrip(null);
+        }
+      });
 
-        // Simulate driver acceptance after 3 seconds (for testing)
-        setTimeout(() => {
-          setSearchStep(2);
-        }, 1500);
+      // Simulation fallback: Only in DEV mode — simulates auto-accept so demo works without real drivers
+      // GUARD: This block is stripped in production builds
+      const autoAcceptTimeout = import.meta.env.DEV ? setTimeout(async () => {
+        if (rideData.id) {
+          const activeDriver = activeDrivers.length > 0 ? activeDrivers[0] : null;
+          await SafMoveAPI.acceptRide(rideData.id, {
+            id: activeDriver?.driver_id || 'drv_auto_1',
+            fullName: 'Kwesi Mensah (Demo)',
+            phone: '+233 24 555 1234',
+            motorcyclePlate: 'GR-24-4502',
+            motorcycleModel: 'Boxer 150',
+            status: 'approved',
+            isOnline: true,
+            currentZone: 'Circle',
+            currentLat: pickup.lat,
+            currentLng: pickup.lng,
+            rating: 4.9,
+            totalTrips: 120,
+            helmetVerified: true,
+            registeredAt: new Date().toISOString(),
+            ghanaCardNumber: 'GHA-123456789-0',
+            driverLicenseNumber: 'DL-9988',
+            guarantorName: 'Pastor James',
+            guarantorPhone: '+233 20 111 2222',
+          });
+          showToast({ type: 'ride', title: '🛵 Rider Matched!', message: 'Kwesi Mensah is on the way to your pickup.' });
+        }
+      }, 4000) : null;
 
-        // Auto-accept simulation after 4 seconds (for testing without real drivers)
-        setTimeout(async () => {
-          if (rideData.id && supabase) {
-            // Find a random active driver
-            const activeDriver = activeDrivers.length > 0 ? activeDrivers[0] : null;
-
-            if (activeDriver) {
-              await supabase
-                .from('rides')
-                .update({
-                  driver_id: activeDriver.driver_id,
-                  status: 'accepted',
-                  updated_at: new Date().toISOString()
-                })
-                .eq('id', rideData.id);
-            }
-          }
-        }, 4000);
-      }
-    } catch (err) {
+      return () => {
+        unsubscribe();
+        if (autoAcceptTimeout) clearTimeout(autoAcceptTimeout);
+      };
+    } catch (err: any) {
       console.error('Failed to request trip:', err);
+      setBookingError(err?.message || 'Failed to dispatch ride request. Please try again.');
       setIsSearchingRider(false);
     }
   };
@@ -570,13 +596,37 @@ export const UserPortal: React.FC<UserPortalProps> = ({
         lng: activeTrip.pickupLocation.lng,
       });
       setSosSuccess(true);
+      showToast({ type: 'error', title: '🚨 SOS Triggered', message: 'Emergency alert sent. Police have been notified.', duration: 8000 });
       setTimeout(() => {
         setShowSosModal(false);
         setSosSuccess(false);
       }, 3500);
     } catch (e) {
       console.error('SOS Trigger failed', e);
+      showToast({ type: 'error', title: 'SOS Failed', message: 'Please call 112 directly.' });
     }
+  };
+
+  // Handle trip completion — show rating modal then receipt
+  const handleTripCompleted = (trip: TripOrder) => {
+    setActiveTrip(null);
+    setIsSearchingRider(false);
+    setTripToRate(trip);
+    showToast({ type: 'success', title: '✅ Trip Completed!', message: `You arrived at ${trip.dropoffLocation.name}. Please rate your rider.` });
+  };
+
+  // Handle rating submission
+  const handleRatingSubmit = (trip: TripOrder, rating: number, comment: string) => {
+    setCompletedTripRating(rating);
+    setTripToRate(null);
+    setTripReceipt(trip);
+    // Persist rating locally
+    const rated = { ...trip, rating, comment, ratedAt: new Date().toISOString() };
+    try {
+      const existingRated = JSON.parse(localStorage.getItem('safmove_rated_trips') || '[]');
+      localStorage.setItem('safmove_rated_trips', JSON.stringify([rated, ...existingRated]));
+    } catch { /* ignore */ }
+    loadData();
   };
 
   // Save profile updates
@@ -596,6 +646,7 @@ export const UserPortal: React.FC<UserPortalProps> = ({
     setPassengerProfile(updated);
     saveLocalPassengerProfile(updated);
     setProfileSavedMsg(true);
+    showToast({ type: 'success', title: 'Profile Saved', message: 'Your details have been updated.' });
     setTimeout(() => {
       setProfileSavedMsg(false);
       setIsEditingProfile(false);
@@ -676,23 +727,51 @@ export const UserPortal: React.FC<UserPortalProps> = ({
               {userData?.user_metadata?.avatar_url || passengerProfile?.avatarUrl ? (
                 <img
                   src={userData?.user_metadata?.avatar_url || passengerProfile?.avatarUrl || ''}
-                  alt={userData?.user_metadata?.full_name || passengerProfile?.fullName || 'User'}
+                  alt={
+                    userData?.user_metadata?.full_name ||
+                    userData?.user_metadata?.name ||
+                    passengerProfile?.fullName ||
+                    userData?.email?.split('@')[0] ||
+                    'Commuter'
+                  }
                   className="w-7 h-7 rounded-full object-cover border border-emerald-600"
                   onError={(e) => {
-                    e.currentTarget.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(userData?.user_metadata?.full_name || passengerProfile?.fullName || 'User')}&background=0D8ABC&color=fff&rounded=true`;
+                    const displayName =
+                      userData?.user_metadata?.full_name ||
+                      userData?.user_metadata?.name ||
+                      passengerProfile?.fullName ||
+                      userData?.email?.split('@')[0] ||
+                      'Commuter';
+                    e.currentTarget.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=0D8ABC&color=fff&rounded=true`;
                   }}
                 />
               ) : (
                 <img
-                  src={`https://ui-avatars.com/api/?name=${encodeURIComponent(userData?.user_metadata?.full_name || passengerProfile?.fullName || 'User')}&background=0D8ABC&color=fff&rounded=true`}
-                  alt={userData?.user_metadata?.full_name || passengerProfile?.fullName || 'User'}
+                  src={`https://ui-avatars.com/api/?name=${encodeURIComponent(
+                    userData?.user_metadata?.full_name ||
+                    userData?.user_metadata?.name ||
+                    passengerProfile?.fullName ||
+                    userData?.email?.split('@')[0] ||
+                    'Commuter'
+                  )}&background=0D8ABC&color=fff&rounded=true`}
+                  alt={
+                    userData?.user_metadata?.full_name ||
+                    userData?.user_metadata?.name ||
+                    passengerProfile?.fullName ||
+                    userData?.email?.split('@')[0] ||
+                    'Commuter'
+                  }
                   className="w-7 h-7 rounded-full object-cover border border-emerald-600"
                 />
               )}
               <span className="absolute bottom-0 right-0 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-white" />
             </div>
             <span className="text-xs font-bold text-slate-900 hidden md:inline">
-              {userData?.user_metadata?.full_name || passengerProfile?.fullName || 'User'}
+              {userData?.user_metadata?.full_name ||
+                userData?.user_metadata?.name ||
+                passengerProfile?.fullName ||
+                userData?.email?.split('@')[0] ||
+                'Commuter'}
             </span>
           </button>
         )}
@@ -772,7 +851,7 @@ export const UserPortal: React.FC<UserPortalProps> = ({
 
     return (
       <div className="relative w-full h-full min-h-[45vh] rounded-3xl overflow-hidden border border-slate-200/90 shadow-sm bg-slate-100">
-        <LeafletMap
+        <MapboxMap
           center={center}
           zoom={13}
           pickup={pickup}
@@ -798,10 +877,22 @@ export const UserPortal: React.FC<UserPortalProps> = ({
           <span className="font-mono text-slate-700">{distanceKm.toFixed(1)} km</span>
         </div>
 
-        {/* Live Safety Badge (Solid white with shadow-md) */}
-        <div className="absolute top-3 right-3 bg-white px-3.5 py-2 rounded-full border border-slate-300 shadow-md flex items-center gap-1.5 text-xs font-bold text-emerald-800 z-[1000]">
-          <ShieldCheck className="w-4 h-4 text-emerald-700" />
-          <span>Verified Riders</span>
+        {/* Top-right: Live Safety Badge and Emergency SOS Button */}
+        <div className="absolute top-3 right-3 flex items-center gap-2 z-[1000]">
+          <div className="bg-white px-3 py-2 rounded-full border border-slate-300 shadow-md flex items-center gap-1.5 text-xs font-bold text-emerald-800">
+            <ShieldCheck className="w-4 h-4 text-emerald-700" />
+            <span className="hidden sm:inline">Verified Riders</span>
+          </div>
+          <SOSEmergencyButton
+            tripId={activeTrip?.id || 'TRIP-ACTIVE'}
+            passengerName={passengerProfile?.fullName || userData?.user_metadata?.full_name || 'Passenger'}
+            passengerPhone={passengerProfile?.phone || userData?.user_metadata?.phone || '+233 24 123 4567'}
+            pickupAddress={pickup.name}
+            dropoffAddress={dropoff.name}
+            driverName={activeTrip?.driverName || matchedRider?.fullName || 'Verified Rider'}
+            driverPlate={activeTrip?.driverPlate || matchedRider?.motorcyclePlate || 'GR-24-4502'}
+            currentCoords={{ lat: pickup.lat, lng: pickup.lng }}
+          />
         </div>
 
         {/* Simulation Control Button (For Testing) */}
@@ -904,57 +995,48 @@ export const UserPortal: React.FC<UserPortalProps> = ({
                   <span className="text-[11px] font-mono font-bold text-slate-700">{userData?.user_metadata?.phone || passengerProfile?.phone || ''}</span>
                 </div>
 
-                {/* Driver Details Card (Avatar, Bike info, Rating - NO Prices) */}
-                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <img
-                      src={activeTrip.driverPhoto || `https://ui-avatars.com/api/?name=${encodeURIComponent(activeTrip.driverName || 'Driver')}&background=0D8ABC&color=fff&rounded=true`}
-                      alt={activeTrip.driverName}
-                      className="w-14 h-14 rounded-2xl object-cover border-2 border-emerald-600 shadow-sm"
-                      onError={(e) => {
-                        e.currentTarget.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(activeTrip.driverName || 'Driver')}&background=0D8ABC&color=fff&rounded=true`;
-                      }}
-                    />
-                    <div>
-                      <h5 className="font-black text-slate-900 text-base">{activeTrip.driverName}</h5>
-                      <div className="flex items-center gap-1.5 text-xs text-slate-700 font-mono mt-0.5 font-semibold">
-                        <span>{activeTrip.driverModel}</span>
-                        <span>•</span>
-                        <strong className="text-slate-900 font-bold">{activeTrip.driverPlate}</strong>
+                {/* ETA Countdown tracker — replaces static driver card when status=accepted */}
+                {(activeTrip.status === 'accepted' || activeTrip.status === 'arriving') ? (
+                  <DriverETATracker trip={activeTrip} />
+                ) : (
+                  activeTrip.driverName && (
+                    <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-11 h-11 rounded-2xl bg-emerald-700 text-white flex items-center justify-center font-black text-lg flex-shrink-0">
+                          {activeTrip.driverName[0]}
+                        </div>
+                        <div>
+                          <h5 className="font-black text-slate-900 text-sm">{activeTrip.driverName}</h5>
+                          <p className="text-xs text-slate-500 font-mono">{activeTrip.driverModel} · {activeTrip.driverPlate}</p>
+                          <div className="flex items-center gap-1 text-xs text-emerald-800 font-bold mt-0.5">
+                            <ShieldCheck className="w-3.5 h-3.5 text-emerald-700" />
+                            <span>Ghana Card &amp; Helmet Verified</span>
+                          </div>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-1 text-xs text-emerald-800 font-bold mt-0.5">
-                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-700" />
-                        <span>Ghana Card & Helmet Verified</span>
-                      </div>
+                      {activeTrip.driverPhone && (
+                        <a href={`tel:${activeTrip.driverPhone}`}
+                          className="p-3.5 rounded-2xl bg-emerald-700 hover:bg-emerald-600 text-white shadow-md transition flex items-center justify-center flex-shrink-0"
+                          title="Call Driver">
+                          <Phone className="w-4 h-4" />
+                        </a>
+                      )}
                     </div>
-                  </div>
-
-                  <a
-                    href={`tel:${activeTrip.driverPhone}`}
-                    className="p-3.5 rounded-2xl bg-emerald-700 hover:bg-emerald-600 text-white shadow-md transition flex items-center justify-center flex-shrink-0"
-                    title="Call Driver"
-                  >
-                    <Phone className="w-4 h-4" />
-                  </a>
-                </div>
+                  )
+                )}
 
                 {/* Route Points */}
                 <div className="space-y-2.5 text-xs">
                   <div className="flex items-start gap-2.5">
-                    <div className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center font-black text-[10px] mt-0.5 flex-shrink-0">
-                      P
-                    </div>
+                    <div className="w-5 h-5 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center font-black text-[10px] mt-0.5 flex-shrink-0">P</div>
                     <div>
                       <span className="text-slate-600 text-[10px] uppercase font-bold block">Pickup Location</span>
                       <p className="font-bold text-slate-900 text-xs sm:text-sm">{activeTrip.pickupLocation.name}</p>
                       <p className="text-xs text-slate-600">{activeTrip.pickupLocation.landmark}</p>
                     </div>
                   </div>
-
                   <div className="flex items-start gap-2.5">
-                    <div className="w-5 h-5 rounded-full bg-slate-900 text-white flex items-center justify-center font-black text-[10px] mt-0.5 flex-shrink-0">
-                      D
-                    </div>
+                    <div className="w-5 h-5 rounded-full bg-slate-900 text-white flex items-center justify-center font-black text-[10px] mt-0.5 flex-shrink-0">D</div>
                     <div>
                       <span className="text-slate-600 text-[10px] uppercase font-bold block">Drop-off Destination</span>
                       <p className="font-bold text-slate-900 text-xs sm:text-sm">{activeTrip.dropoffLocation.name}</p>
@@ -963,10 +1045,25 @@ export const UserPortal: React.FC<UserPortalProps> = ({
                   </div>
                 </div>
 
-                {/* Fare Amount */}
-                <div className="p-3 bg-emerald-50 rounded-2xl border border-emerald-200 flex items-center justify-between">
-                  <span className="text-xs text-emerald-700 font-semibold">Total Fare</span>
-                  <span className="text-lg font-black text-emerald-900">GH₵ {activeTrip.fareGHS?.toFixed(2) || '0.00'}</span>
+                {/* Fare Amount + MoMo Pay */}
+                <div className="p-3 bg-emerald-50 rounded-2xl border border-emerald-200 flex items-center justify-between gap-2">
+                  <div>
+                    <p className="text-[11px] text-emerald-700 font-bold uppercase tracking-wider">Total Fare</p>
+                    <span className="text-lg font-black text-emerald-900">GH₵ {activeTrip.fareGHS?.toFixed(2) || '0.00'}</span>
+                  </div>
+                  {activeTrip.paymentStatus === 'pending' && (
+                    <button
+                      onClick={() => setShowMomoModal(true)}
+                      className="px-3 py-2 rounded-xl bg-yellow-500 hover:bg-yellow-400 text-black font-black text-xs transition flex items-center gap-1.5 shadow-md"
+                    >
+                      <span>📱</span> Pay MoMo
+                    </button>
+                  )}
+                  {activeTrip.paymentStatus !== 'pending' && (
+                    <span className="text-xs font-bold text-emerald-700 bg-emerald-100 px-3 py-1.5 rounded-full border border-emerald-200">
+                      ✓ {activeTrip.paymentMethod === 'momo' ? 'Paid via MoMo' : 'Pay Cash on Arrival'}
+                    </span>
+                  )}
                 </div>
 
                 {/* Action Buttons: Safety WhatsApp Share & Emergency SOS */}
@@ -1170,15 +1267,52 @@ export const UserPortal: React.FC<UserPortalProps> = ({
                     </div>
                   )}
 
-                  {/* Big Confirmation Button (Zero Price Mention) */}
+                  {/* Fare Estimator - live pricing breakdown */}
+                  <div className="pt-1">
+                    <FareEstimator
+                      pickup={pickup}
+                      dropoff={dropoff}
+                      serviceType={serviceType}
+                    />
+                  </div>
+
+                  {/* Booking error state banner */}
+                  {bookingError && (
+                    <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-2xl flex items-start gap-2.5 text-xs text-rose-800">
+                      <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                      <div className="flex-1">
+                        <strong className="font-bold block">Dispatch Error</strong>
+                        <span>{bookingError}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setBookingError(null)}
+                        className="text-rose-500 hover:text-rose-800 p-0.5"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Big Confirmation Button with Loading Spinner */}
                   <div className="pt-1">
                     <button
                       type="submit"
                       id="btn-confirm-passenger-dispatch"
-                      className="w-full py-4 rounded-full bg-emerald-700 hover:bg-emerald-600 text-white font-black text-sm tracking-wider uppercase shadow-xl shadow-emerald-700/30 flex items-center justify-center gap-2 transition-all active:scale-[0.98] cursor-pointer"
+                      disabled={isSearchingRider}
+                      className="w-full py-4 rounded-full bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white font-black text-sm tracking-wider uppercase shadow-xl shadow-emerald-700/30 flex items-center justify-center gap-2 transition-all active:scale-[0.98] cursor-pointer"
                     >
-                      <Navigation className="w-4 h-4" />
-                      <span>Request Verified Rider ({estDurationMinutes} mins ETA)</span>
+                      {isSearchingRider ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Dispatching to Accra Riders...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Navigation className="w-4 h-4" />
+                          <span>Request Verified Rider ({estDurationMinutes} mins ETA)</span>
+                        </>
+                      )}
                     </button>
                   </div>
                 </form>
@@ -1673,6 +1807,39 @@ export const UserPortal: React.FC<UserPortalProps> = ({
 
       {/* Fixed Bottom Navigation */}
       {renderBottomNav()}
+
+      {/* ── Post-Trip Rating Modal ─────────────────────────────────── */}
+      {tripToRate && (
+        <TripRatingModal
+          trip={tripToRate}
+          onSubmit={(rating, comment) => handleRatingSubmit(tripToRate, rating, comment)}
+          onDismiss={() => setTripToRate(null)}
+        />
+      )}
+
+      {/* ── Trip Receipt Modal ─────────────────────────────────────── */}
+      {tripReceipt && (
+        <TripReceipt
+          trip={tripReceipt}
+          rating={completedTripRating}
+          onClose={() => setTripReceipt(null)}
+        />
+      )}
+
+      {/* ── MoMo Payment Modal ────────────────────────────────────── */}
+      {showMomoModal && activeTrip && (
+        <MoMoPaymentModal
+          amount={activeTrip.fareGHS}
+          rideId={currentRideId || activeTrip.id}
+          passengerPhone={passengerProfile?.phone || '+233240000000'}
+          onSuccess={(ref) => {
+            setShowMomoModal(false);
+            setActiveTrip((prev) => prev ? { ...prev, paymentStatus: 'paid_momo', paymentMethod: 'momo' } : null);
+            showToast({ type: 'success', title: '💚 MoMo Payment Confirmed!', message: `Ref: ${ref}` });
+          }}
+          onCancel={() => setShowMomoModal(false)}
+        />
+      )}
     </div>
   );
 };
