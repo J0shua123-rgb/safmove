@@ -1,5 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { DriverProfile, TripOrder, SOSAlert, DriverStatus, TripStatus, UserProfile } from '../types';
+import { DriverProfile, TripOrder, SOSAlert, DriverStatus, TripStatus, UserProfile, RideRequest, RideStatus } from '../types';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
@@ -16,6 +16,7 @@ export const supabase: SupabaseClient | null = isSupabaseConfigured
 // Local persistent storage keys for preview & offline-first capability
 const STORAGE_DRIVERS = 'safmove_drivers_v1';
 const STORAGE_TRIPS = 'safmove_trips_v1';
+const STORAGE_RIDES = 'safmove_rides_v1';
 const STORAGE_SOS = 'safmove_sos_v1';
 export const STORAGE_DRIVER_SESSION = 'safmove_driver_session_id';
 export const STORAGE_ADMIN_PASSCODE = 'safmove_admin_master_passcode';
@@ -152,6 +153,27 @@ export function saveLocalTrips(trips: TripOrder[]): void {
     }
   } catch (err) {
     console.error('Failed to save trips locally', err);
+  }
+}
+
+export function getLocalRides(): RideRequest[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_RIDES);
+    if (!raw) return [];
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
+}
+
+export function saveLocalRides(rides: RideRequest[]): void {
+  try {
+    localStorage.setItem(STORAGE_RIDES, JSON.stringify(rides));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('safmove:rides_sync', { detail: rides }));
+    }
+  } catch (err) {
+    console.error('Failed to save rides locally', err);
   }
 }
 
@@ -448,6 +470,222 @@ export const SafMoveAPI = {
     return true;
   },
 
+  // ─── Realtime Ride Request Dispatch Flow (rides table) ────────────────
+  async dispatchRideRequest(
+    rideData: Omit<RideRequest, 'id' | 'created_at' | 'updated_at'>
+  ): Promise<RideRequest> {
+    const newRide: RideRequest = {
+      ...rideData,
+      id: `RIDE-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    // Save locally first for offline resilience
+    const localRides = getLocalRides();
+    saveLocalRides([newRide, ...localRides]);
+
+    // Also mirror to legacy trips table for backwards compatibility
+    const mirrorTrip: Omit<TripOrder, 'id' | 'createdAt' | 'updatedAt' | 'liveShareToken'> = {
+      userId: newRide.passenger_id || 'guest',
+      userName: newRide.passenger_name || 'SafMove Passenger',
+      userPhone: newRide.passenger_phone || '',
+      serviceType: 'passenger',
+      pickupLocation: {
+        id: 'p1',
+        name: newRide.pickup_address,
+        area: 'Accra',
+        landmark: '',
+        lat: newRide.pickup_lat,
+        lng: newRide.pickup_lng,
+      },
+      dropoffLocation: {
+        id: 'd1',
+        name: newRide.dropoff_address,
+        area: 'Accra',
+        landmark: '',
+        lat: newRide.dropoff_lat,
+        lng: newRide.dropoff_lng,
+      },
+      distanceKm: Math.max(1, Number((newRide.fare_amount / 5).toFixed(1))),
+      estDurationMinutes: 15,
+      fareGHS: newRide.fare_amount,
+      surgeMultiplier: 1.0,
+      paymentMethod: 'cash',
+      paymentStatus: 'pending',
+      status: 'requested',
+    };
+    await this.createTrip(mirrorTrip).catch(() => {});
+
+    // Save to Supabase 'rides' table
+    if (isSupabaseConfigured && supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('rides')
+          .insert([newRide])
+          .select()
+          .single();
+
+        if (!error && data) {
+          return data as RideRequest;
+        }
+      } catch (err) {
+        console.warn('Supabase ride dispatch fallback to local:', err);
+      }
+    }
+
+    return newRide;
+  },
+
+  async getRides(): Promise<RideRequest[]> {
+    if (isSupabaseConfigured && supabase) {
+      try {
+        const { data, error } = await supabase
+          .from('rides')
+          .select('*')
+          .order('created_at', { ascending: false });
+
+        if (!error && data && data.length > 0) {
+          return data as RideRequest[];
+        }
+      } catch (err) {
+        console.warn('Supabase rides fetch failed, falling back to local:', err);
+      }
+    }
+    return getLocalRides();
+  },
+
+  // Subscribe to live status changes of a specific ride
+  subscribeToRide(
+    rideId: string,
+    onUpdate: (ride: RideRequest) => void
+  ): () => void {
+    if (!isSupabaseConfigured || !supabase) {
+      // Local event fallback
+      const handleSync = (e: any) => {
+        const updated = (e.detail as RideRequest[])?.find((r) => r.id === rideId);
+        if (updated) onUpdate(updated);
+      };
+      window.addEventListener('safmove:rides_sync', handleSync);
+      return () => window.removeEventListener('safmove:rides_sync', handleSync);
+    }
+
+    const channel = supabase
+      .channel(`ride_${rideId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'rides',
+          filter: `id=eq.${rideId}`,
+        },
+        (payload: any) => {
+          if (payload.new) {
+            onUpdate(payload.new as RideRequest);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  },
+
+  // Driver radar: subscribe to all available searching rides
+  subscribeToAvailableRides(onNewRide: (ride: RideRequest) => void): () => void {
+    if (!isSupabaseConfigured || !supabase) {
+      return () => {};
+    }
+
+    const channel = supabase
+      .channel('public_rides_searching')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'rides',
+        },
+        (payload: any) => {
+          if (payload.new && payload.new.status === 'searching') {
+            onNewRide(payload.new as RideRequest);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  },
+
+  // Accept a ride request
+  async acceptRide(rideId: string, driver: DriverProfile): Promise<boolean> {
+    const updatePayload = {
+      driver_id: driver.id,
+      driver_name: driver.fullName,
+      driver_phone: driver.phone,
+      driver_plate: driver.motorcyclePlate,
+      status: 'accepted' as RideStatus,
+      updated_at: new Date().toISOString(),
+    };
+
+    const localRides = getLocalRides().map((r) =>
+      r.id === rideId ? { ...r, ...updatePayload } : r
+    );
+    saveLocalRides(localRides);
+
+    if (isSupabaseConfigured && supabase) {
+      try {
+        await supabase.from('rides').update(updatePayload).eq('id', rideId);
+      } catch (err) {
+        console.warn('Supabase accept ride error:', err);
+      }
+    }
+    return true;
+  },
+
+  // Cancel a ride request
+  async cancelRide(rideId: string, reason?: string): Promise<boolean> {
+    const updatePayload = {
+      status: 'cancelled' as RideStatus,
+      updated_at: new Date().toISOString(),
+    };
+
+    const localRides = getLocalRides().map((r) =>
+      r.id === rideId ? { ...r, ...updatePayload } : r
+    );
+    saveLocalRides(localRides);
+
+    if (isSupabaseConfigured && supabase) {
+      try {
+        await supabase.from('rides').update(updatePayload).eq('id', rideId);
+      } catch (err) {
+        console.warn('Supabase cancel ride error:', err);
+      }
+    }
+    return true;
+  },
+
+  // Update user role in Supabase metadata
+  async updateUserRole(role: 'passenger' | 'driver'): Promise<boolean> {
+    if (isSupabaseConfigured && supabase) {
+      try {
+        const { error } = await supabase.auth.updateUser({
+          data: { role },
+        });
+        if (error) throw error;
+        return true;
+      } catch (err) {
+        console.warn('Error updating user role metadata:', err);
+        return false;
+      }
+    }
+    return true;
+  },
+
   // Reset demo data helper
   getAdminPasscode(): string {
     return getAdminPasscode();
@@ -549,11 +787,57 @@ CREATE TABLE IF NOT EXISTS public.sos_alerts (
 
 -- =======================================================
 -- ROW LEVEL SECURITY (RLS) POLICIES
+-- 4. RIDES TABLE (Real-time Ride Dispatch)
+CREATE TABLE IF NOT EXISTS public.rides (
+    id TEXT PRIMARY KEY,
+    passenger_id TEXT,
+    driver_id TEXT REFERENCES public.drivers(id) ON DELETE SET NULL,
+    pickup_lat NUMERIC NOT NULL,
+    pickup_lng NUMERIC NOT NULL,
+    pickup_address TEXT NOT NULL,
+    dropoff_lat NUMERIC NOT NULL,
+    dropoff_lng NUMERIC NOT NULL,
+    dropoff_address TEXT NOT NULL,
+    fare_amount NUMERIC NOT NULL,
+    status TEXT NOT NULL DEFAULT 'searching' CHECK (status IN ('searching', 'accepted', 'arriving', 'in_progress', 'completed', 'cancelled')),
+    passenger_name TEXT,
+    passenger_phone TEXT,
+    driver_name TEXT,
+    driver_phone TEXT,
+    driver_plate TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 5. DRIVER LIVE LOCATIONS TABLE (Real-time GPS tracking)
+CREATE TABLE IF NOT EXISTS public.driver_locations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    driver_id TEXT NOT NULL REFERENCES public.drivers(id) ON DELETE CASCADE,
+    lat NUMERIC NOT NULL,
+    lng NUMERIC NOT NULL,
+    heading NUMERIC DEFAULT 0,
+    speed_kmh NUMERIC DEFAULT 0,
+    is_active BOOLEAN DEFAULT true,
+    last_updated TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Index for fast active driver queries
+CREATE INDEX IF NOT EXISTS idx_driver_locations_active ON public.driver_locations(is_active, last_updated DESC);
+
+-- =======================================================
+-- ROW LEVEL SECURITY (RLS) POLICIES
 -- =======================================================
 
 ALTER TABLE public.drivers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.trips ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.rides ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.sos_alerts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.driver_locations ENABLE ROW LEVEL SECURITY;
+
+-- RIDES POLICIES:
+CREATE POLICY "Public can view and manage rides"
+ON public.rides FOR ALL
+USING (true) WITH CHECK (true);
 
 -- DRIVERS POLICIES:
 -- Anyone can view approved and online drivers for booking radar
@@ -597,13 +881,28 @@ CREATE POLICY "Admin & Dispatch can view SOS alerts"
 ON public.sos_alerts FOR SELECT 
 USING (true);
 
+-- DRIVER LOCATIONS:
+CREATE POLICY "Active driver locations are publicly visible"
+ON public.driver_locations FOR SELECT
+USING (is_active = true);
+
+CREATE POLICY "Drivers can upsert their own location"
+ON public.driver_locations FOR ALL
+USING (auth.uid()::text = driver_id) WITH CHECK (auth.uid()::text = driver_id);
+
 -- =======================================================
 -- SUPABASE REALTIME CONFIGURATION
 -- =======================================================
+
+-- Enable Realtime for rides table (for real-time dispatch)
+ALTER PUBLICATION supabase_realtime ADD TABLE public.rides;
 
 -- Enable Realtime for trips table (for live cancellations)
 ALTER PUBLICATION supabase_realtime ADD TABLE public.trips;
 
 -- Enable Realtime for drivers table (for live location updates)
 ALTER PUBLICATION supabase_realtime ADD TABLE public.drivers;
+
+-- Enable Realtime for driver_locations (for live GPS tracking)
+ALTER PUBLICATION supabase_realtime ADD TABLE public.driver_locations;
 `;

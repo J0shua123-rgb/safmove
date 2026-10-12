@@ -1,1 +1,44 @@
 @import "tailwindcss";
+
+@theme {
+  /* ── Brand Colors ─────────────────────────────────────────────────── */
+
+  /* Primary – bright SafMove yellow */
+  --color-primary: #F9EB4F;
+  --color-primary-50:  #fefee8;
+  --color-primary-100: #fdfdc4;
+  --color-primary-200: #fafa8c;
+  --color-primary-300: #F9EB4F;   /* base */
+  --color-primary-400: #f5d90a;
+  --color-primary-500: #d4b800;
+  --color-primary-600: #a98e00;
+  --color-primary-700: #7d6800;
+  --color-primary-800: #544600;
+  --color-primary-900: #2b2300;
+
+  /* Dark – near-black for text & deep backgrounds */
+  --color-dark: #111827;
+  --color-dark-50:  #f9fafb;
+  --color-dark-100: #f3f4f6;
+  --color-dark-200: #e5e7eb;
+  --color-dark-300: #d1d5db;
+  --color-dark-400: #9ca3af;
+  --color-dark-500: #6b7280;
+  --color-dark-600: #4b5563;
+  --color-dark-700: #374151;
+  --color-dark-800: #1f2937;
+  --color-dark-900: #111827;   /* base */
+
+  /* Background – off-white / light grey */
+  --color-background: #F8F9FA;
+
+  /* ── Eco Gradient ─────────────────────────────────────────────────── */
+  /* Light green → light yellow — for eco/green-mode UI states.         */
+  /* Usage: class="bg-eco-gradient"                                      */
+  --background-image-eco-gradient: linear-gradient(
+    135deg,
+    #d1fae5 0%,    /* emerald-100  – soft green  */
+    #ecfccb 50%,   /* lime-100     – yellow-green */
+    #fef9c3 100%   /* yellow-100   – light yellow */
+  );
+}

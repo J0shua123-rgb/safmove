@@ -25,7 +25,8 @@ import {
   Radio,
   Package,
   Layers,
-  Award
+  Award,
+  Loader2,
 } from 'lucide-react';
 import { DriverProfile, TripOrder, TripStatus } from '../../types';
 import { ACCRA_HUBS, ACCRA_ZONES } from '../../lib/accraData';
@@ -39,7 +40,7 @@ import {
 } from '../../lib/supabase';
 import { processImageFile } from '../../lib/imageUtils';
 import { PWAInstallButton } from '../common/PWAInstallButton';
-import { LeafletMap } from '../common/LeafletMap';
+import { MapboxMap } from '../MapboxMap';
 
 interface DriverPortalProps {
   onBackToHome: () => void;
@@ -477,7 +478,7 @@ export const DriverPortal: React.FC<DriverPortalProps> = ({
     setCurrentDriver({ ...currentDriver, isOnline: newStatus });
   };
 
-  // Accept an incoming requested trip
+  // Accept an incoming requested trip (both in trips and real-time rides table)
   const handleAcceptTrip = async (tripId: string) => {
     if (!currentDriver || currentDriver.status !== 'approved') return;
     await SafMoveAPI.updateTripStatus(tripId, 'accepted', {
@@ -489,6 +490,8 @@ export const DriverPortal: React.FC<DriverPortalProps> = ({
       driverModel: currentDriver.motorcycleModel,
       driverGhanaCard: currentDriver.ghanaCardNumber,
     });
+    // Realtime rides table sync
+    await SafMoveAPI.acceptRide(tripId, currentDriver);
     await loadData();
   };
 
@@ -675,7 +678,7 @@ export const DriverPortal: React.FC<DriverPortalProps> = ({
 
     return (
       <div className="relative w-full h-[46vh] sm:h-[54vh] rounded-3xl overflow-hidden border border-slate-200/90 shadow-sm bg-slate-100">
-        <LeafletMap
+        <MapboxMap
           center={center}
           zoom={13}
           pickup={pickupLocation}
@@ -930,9 +933,16 @@ export const DriverPortal: React.FC<DriverPortalProps> = ({
                   type="submit"
                   id="btn-submit-driver-registration"
                   disabled={isSubmitting}
-                  className="w-full py-3.5 rounded-2xl bg-emerald-700 hover:bg-emerald-600 text-white font-black text-sm transition shadow-lg shadow-emerald-700/20 flex items-center justify-center gap-2 cursor-pointer"
+                  className="w-full py-3.5 rounded-2xl bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white font-black text-sm transition shadow-lg shadow-emerald-700/20 flex items-center justify-center gap-2 cursor-pointer"
                 >
-                  {isSubmitting ? 'Submitting Application...' : 'Submit Profile for Admin Verification'}
+                  {isSubmitting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Submitting Application...</span>
+                    </>
+                  ) : (
+                    <span>Submit Profile for Admin Verification</span>
+                  )}
                 </button>
               </div>
             </form>
@@ -1601,10 +1611,19 @@ export const DriverPortal: React.FC<DriverPortalProps> = ({
                     <button
                       type="submit"
                       disabled={isSavingProfile}
-                      className="flex-1 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs transition flex items-center justify-center gap-1.5 shadow-md shadow-emerald-700/20 cursor-pointer"
+                      className="flex-1 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold text-xs transition flex items-center justify-center gap-1.5 shadow-md shadow-emerald-700/20 cursor-pointer"
                     >
-                      <Save className="w-3.5 h-3.5" />
-                      {isSavingProfile ? 'Saving...' : 'Save Changes'}
+                      {isSavingProfile ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Saving Changes...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Save className="w-3.5 h-3.5" />
+                          <span>Save Changes</span>
+                        </>
+                      )}
                     </button>
                     <button
                       type="button"
